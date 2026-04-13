@@ -1,7 +1,4 @@
 fastapi
 uvicorn
-requests
-pydantic
-python-multipart
 Pillow
 pytesseract
