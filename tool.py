@@ -1,66 +1,81 @@
 import base64
-import os
-import re
-import io
 import cv2
 import numpy as np
-from fastapi import FastAPI, HTTPException, Header, Request
+import io
+import re
+import os
+from fastapi import FastAPI, Header, Request, HTTPException
 import uvicorn
-from PIL import Image
 import pytesseract
+from PIL import Image
 
 app = FastAPI()
 
+# Key bảo mật của Minh Vũ
 API_SECRET_KEY = "giaiautocaptchabydvfast"
 
-def solve_universal_ocr(img_b64):
+def solve_universal_captcha(img_b64):
     try:
-        # 1. Chuyển Base64 sang mảng OpenCV
+        # Giải mã base64
         img_bytes = base64.b64decode(img_b64)
         nparr = np.frombuffer(img_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-        # 2. Phóng to ảnh để xử lý nét hơn
-        img = cv2.resize(img, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        # BƯỚC 1: Phóng to ảnh x4 để tách các đường kẻ nhiễu mảnh
+        img = cv2.resize(img, None, fx=4, fy=4, interpolation=cv2.INTER_LANCZOS4)
 
-        # 3. Chuyển sang ảnh xám
+        # BƯỚC 2: Chuyển sang ảnh xám
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-        # 4. Khử nhiễu (Dùng lọc nhiễu song phương để giữ lại cạnh chữ)
-        denoised = cv2.bilateralFilter(gray, 9, 75, 75)
+        # BƯỚC 3: Lọc nhiễu Median (Xóa các hạt bụi và đường kẻ li ti)
+        gray = cv2.medianBlur(gray, 3)
 
-        # 5. Thuật toán tự động tách nền (Otsu's Thresholding)
-        # Tự động tìm ngưỡng đen/trắng tối ưu cho từng ảnh khác nhau
-        _, thresh = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        # BƯỚC 4: Ngưỡng thích nghi (Adaptive Threshold)
+        # Tự động tách chữ ra khỏi nền dù nền có nhiều màu hay ánh sáng không đều
+        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                     cv2.THRESH_BINARY_INV, 11, 2)
 
-        # 6. Làm dầy nét chữ (Dilation) nếu chữ quá mảnh
+        # BƯỚC 5: Tẩy đốm nhiễu còn sót lại (Morphology)
         kernel = np.ones((2,2), np.uint8)
-        thresh = cv2.dilate(thresh, kernel, iterations=1)
+        processed_img = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
 
-        # 7. Cấu hình Tesseract mạnh nhất
-        # --psm 6: Coi là một khối chữ đồng nhất
-        # Whitelist: Cho phép cả chữ hoa, chữ thường và số
+        # BƯỚC 6: Nhận diện bằng Tesseract
+        # --psm 6: Coi ảnh là một khối văn bản (linh hoạt số lượng ký tự)
         custom_config = r'--psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
-        
-        result = pytesseract.image_to_string(thresh, config=custom_config)
-        
-        # Làm sạch kết quả
-        clean_text = re.sub(r'[^0-9a-zA-Z]', '', result).strip()
-        return clean_text
+        result = pytesseract.image_to_string(processed_img, config=custom_config)
+
+        # Làm sạch kết quả: chỉ lấy chữ và số
+        return re.sub(r'[^0-9a-zA-Z]', '', result).strip()
     except Exception as e:
-        print(f"Lỗi: {e}")
+        print(f"Lỗi xử lý: {e}")
         return None
+
+@app.get("/")
+async def root():
+    return {"status": "running", "mode": "universal_ocr"}
 
 @app.post("/decrypt")
 async def decrypt(request: Request, x_api_key: str = Header(None)):
+    # Kiểm tra Key bảo mật
     if x_api_key != API_SECRET_KEY:
-        raise HTTPException(status_code=403, detail="Key sai")
-    data = await request.json()
-    img_b64 = data.get("img_base64")
-    result = solve_universal_ocr(img_b64)
-    if result:
-        return {"status": "success", "result": result}
-    return {"status": "error", "message": "Không đọc được"}
+        raise HTTPException(status_code=403, detail="Forbidden")
+    
+    try:
+        data = await request.json()
+        img_b64 = data.get("img_base64")
+        
+        if not img_b64:
+            return {"status": "error", "message": "No data"}
+            
+        captcha_text = solve_universal_captcha(img_b64)
+        
+        if captcha_text:
+            return {"status": "success", "result": captcha_text}
+        else:
+            return {"status": "error", "message": "Could not read captcha"}
+            
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
