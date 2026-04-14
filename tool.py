@@ -13,37 +13,36 @@ API_SECRET_KEY = "giaiautocaptchabydvfast"
 
 def solve_max_level_ocr(img_b64):
     try:
-        # Giải mã ảnh
         img_bytes = base64.b64decode(img_b64)
         nparr = np.frombuffer(img_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-        # 1. Phóng to ảnh cực đại (x5) để tách biệt các điểm nhiễu
-        img = cv2.resize(img, None, fx=5, fy=5, interpolation=cv2.INTER_LANCZOS4)
+        # 1. Phóng to ảnh (x4) - Bước này bắt buộc để AI nhìn rõ nét chữ
+        img = cv2.resize(img, None, fx=4, fy=4, interpolation=cv2.INTER_LANCZOS4)
 
-        # 2. Chuyển sang ảnh xám và khử nhiễu đa tần
+        # 2. Chuyển sang ảnh xám
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        
-        # 3. Kỹ thuật Adaptive Threshold kết hợp với Otsu để tạo độ tương phản tuyệt đối
-        # Giúp loại bỏ nền màu và các đường kẻ mờ
+
+        # 3. Khử nhiễu trắng (Dùng Median Blur để xóa các hạt li ti)
+        gray = cv2.medianBlur(gray, 3)
+
+        # 4. Ngưỡng thích nghi (Tạo ảnh trắng đen cực nét)
+        # Chỉnh hằng số C = 10 để xóa bớt các đường gạch mờ
         thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
                                      cv2.THRESH_BINARY_INV, 21, 10)
 
-        # 4. Max Level Processing: MORPH_OPEN & MORPH_CLOSE
-        # MORPH_OPEN: Xóa các chấm nhiễu li ti và đường kẻ cực mảnh
-        # MORPH_CLOSE: Lấp đầy các lỗ hổng bên trong chữ cái giúp chữ liền mạch
-        kernel = np.ones((3,3), np.uint8)
-        processed = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
-        processed = cv2.morphologyEx(processed, cv2.MORPH_CLOSE, kernel)
+        # 5. CHIÊU QUYẾT ĐỊNH: Xói mòn (Erosion) rồi lại Giãn nở (Dilation)
+        # Đường kẻ thường mảnh hơn nét chữ -> Xói mòn sẽ làm biến mất đường kẻ
+        # Sau đó Giãn nở lại để chữ lấy lại vóc dáng cũ
+        kernel = np.ones((2,2), np.uint8)
+        processed = cv2.erode(thresh, kernel, iterations=1) # Bào mòn đường kẻ
+        processed = cv2.dilate(processed, kernel, iterations=1) # Đắp lại nét chữ
 
-        # 5. Cấu hình Tesseract "Hardcore"
-        # --oem 3: Dùng engine LSTM (Deep Learning) của Tesseract
-        # --psm 6: Coi là một khối chữ đồng nhất
+        # 6. Đọc chữ (Ưu tiên engine LSTM mới nhất)
         custom_config = r'--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
-        
         result = pytesseract.image_to_string(processed, config=custom_config)
-        clean_text = re.sub(r'[^0-9A-Z]', '', result).strip()
 
+        clean_text = re.sub(r'[^0-9A-Z]', '', result).strip()
         return clean_text
     except Exception as e:
         return None
